@@ -9,8 +9,9 @@ public class ExcelManager : MonoBehaviour
 {
     public static ExcelManager Instance { get; private set; }
 
-    [Header("URL de tu Google Sheets")]
-    [SerializeField] private string csvUrl = "https://docs.google.com/spreadsheets/d/1skunAahwbC_x-WSd5KPmifCHFmGFpmf_tz8SIGo7gFI/edit?gid=0#gid=0";
+    [Header("URL de tu Google Sheets")] [SerializeField]
+    private string csvUrl =
+        "https://docs.google.com/spreadsheets/d/1skunAahwbC_x-WSd5KPmifCHFmGFpmf_tz8SIGo7gFI/edit?gid=0#gid=0";
 
     [Serializable]
     public class UnitData
@@ -25,12 +26,17 @@ public class ExcelManager : MonoBehaviour
         public float alcance;
         public float defensaFisica;
         public float defensaMagica;
+        public float poderCombate; // Columna "Poder de combate" del Excel (0 si no hay dato)
     }
 
     public Dictionary<string, UnitData> UnidadesPorNombre = new Dictionary<string, UnitData>();
     public List<UnitData> ListaUnidades = new List<UnitData>();
 
-    private Dictionary<string, Dictionary<string, float>> matrizFacciones = new Dictionary<string, Dictionary<string, float>>();
+    private Dictionary<string, Dictionary<string, float>> matrizFacciones =
+        new Dictionary<string, Dictionary<string, float>>();
+
+    // Si no se encuentra la cabecera "Poder de combate", se asume esta columna (L, Ã­ndice 11)
+    private const int COLUMNA_PODER_POR_DEFECTO = 11;
 
     public bool DatosCargados { get; private set; } = false;
     public event Action OnDatosCargados;
@@ -62,6 +68,7 @@ public class ExcelManager : MonoBehaviour
         {
             return rawUrl.Substring(0, editIndex) + "/export?format=csv&gid=0";
         }
+
         return rawUrl;
     }
 
@@ -95,6 +102,7 @@ public class ExcelManager : MonoBehaviour
         string[] lines = csvData.Split(new char[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
         List<string> ordenColumnasFacciones = new List<string>();
         bool leyendoTablaFacciones = false;
+        int colPoder = -1; // Se rellena al encontrar la cabecera "Poder de combate"
 
         for (int i = 0; i < lines.Length; i++)
         {
@@ -112,8 +120,14 @@ public class ExcelManager : MonoBehaviour
 
             if (!leyendoTablaFacciones)
             {
-                if (string.IsNullOrEmpty(colB) || colB.Equals("Facción", StringComparison.OrdinalIgnoreCase) || colB.Contains("BALANCEO"))
+                bool esCabecera = colB.StartsWith("Facci", StringComparison.OrdinalIgnoreCase);
+
+                if (string.IsNullOrEmpty(colB) || esCabecera || colB.Contains("BALANCEO"))
+                {
+                    // En la cabecera de la tabla de unidades localizamos la columna "Poder de combate"
+                    if (esCabecera) colPoder = BuscarColumnaPoder(fields);
                     continue;
+                }
 
                 if (fields.Count >= 11 && !string.IsNullOrEmpty(colC))
                 {
@@ -128,7 +142,11 @@ public class ExcelManager : MonoBehaviour
                     TryParsePercentage(fields[9], out float defFisica);
                     TryParsePercentage(fields[10], out float defMagica);
 
-                    // Si las celdas aún están vacías en el Excel, usa temporalmente las del mismo Rol
+                    float poder = 0f;
+                    int idxPoder = colPoder >= 0 ? colPoder : COLUMNA_PODER_POR_DEFECTO;
+                    if (idxPoder < fields.Count) TryParseFloat(fields[idxPoder], out poder);
+
+                    // Si las celdas aÃºn estÃ¡n vacÃ­as en el Excel, usa temporalmente las del mismo Rol
                     if (!tieneStats && respaldoPorRol.TryGetValue(rolKey, out UnitData baseRol))
                     {
                         dano = baseRol.danoAtaque;
@@ -137,6 +155,7 @@ public class ExcelManager : MonoBehaviour
                         alcance = baseRol.alcance;
                         defFisica = baseRol.defensaFisica;
                         defMagica = baseRol.defensaMagica;
+                        if (poder <= 0f) poder = baseRol.poderCombate;
                     }
 
                     UnitData data = new UnitData
@@ -150,7 +169,8 @@ public class ExcelManager : MonoBehaviour
                         velocidadAtaque = velAtaque > 0 ? velAtaque : 1f,
                         alcance = alcance > 0 ? alcance : 1f,
                         defensaFisica = defFisica,
-                        defensaMagica = defMagica
+                        defensaMagica = defMagica,
+                        poderCombate = poder
                     };
 
                     if (tieneStats && !respaldoPorRol.ContainsKey(rolKey))
@@ -163,7 +183,24 @@ public class ExcelManager : MonoBehaviour
             }
             else
             {
-                if (string.IsNullOrEmpty(colB) && !string.IsNullOrEmpty(colC) && !colC.Equals("Defensores", StringComparison.OrdinalIgnoreCase))
+                // Formato lista (el de tu hoja): Atacante | multiplicador | Defensor, p. ej. "Orden | 1,5 | Caos"
+                if (!string.IsNullOrEmpty(colB) && fields.Count > 3)
+                {
+                    string colD = fields[3].Trim();
+                    if (!string.IsNullOrEmpty(colD) && TryParseFloat(colC, out float multLista) &&
+                        !TryParseFloat(colD, out _))
+                    {
+                        string atk = colB.ToLowerInvariant();
+                        if (!matrizFacciones.ContainsKey(atk))
+                            matrizFacciones[atk] = new Dictionary<string, float>();
+                        matrizFacciones[atk][colD.ToLowerInvariant()] = multLista;
+                        continue;
+                    }
+                }
+
+                // Formato matriz (cabecera con facciones en columnas)
+                if (string.IsNullOrEmpty(colB) && !string.IsNullOrEmpty(colC) &&
+                    !colC.Equals("Defensores", StringComparison.OrdinalIgnoreCase))
                 {
                     ordenColumnasFacciones.Clear();
                     for (int c = 2; c <= 5 && c < fields.Count; c++)
@@ -185,7 +222,30 @@ public class ExcelManager : MonoBehaviour
             }
         }
 
-        Debug.Log($"[ExcelManager] {ListaUnidades.Count} unidades cargadas desde Google Sheets.");
+        string infoPoder = colPoder >= 0
+            ? $"columna {colPoder}"
+            : $"cabecera no encontrada, se usa la columna {COLUMNA_PODER_POR_DEFECTO}";
+        int relaciones = 0;
+        foreach (var kv in matrizFacciones) relaciones += kv.Value.Count;
+
+        Debug.Log(
+            $"[ExcelManager] {ListaUnidades.Count} unidades y {relaciones} relaciones entre facciones cargadas desde Google Sheets. Poder de combate: {infoPoder}.");
+    }
+
+    /// <summary>Busca en la fila de cabecera la columna "Poder de combate" (o, en su defecto, cualquiera que contenga "poder").</summary>
+    private int BuscarColumnaPoder(List<string> cabecera)
+    {
+        int candidata = -1;
+        for (int c = 0; c < cabecera.Count; c++)
+        {
+            string h = cabecera[c].Trim().ToLowerInvariant();
+            if (!h.Contains("poder")) continue;
+
+            if (h.Contains("combate")) return c;
+            if (candidata < 0) candidata = c;
+        }
+
+        return candidata;
     }
 
     public float ObtenerMultiplicadorFaccion(string faccionAtacante, string faccionDefensora)
@@ -210,9 +270,14 @@ public class ExcelManager : MonoBehaviour
         {
             char c = line[i];
             if (c == '"') inQuotes = !inQuotes;
-            else if (c == ',' && !inQuotes) { result.Add(current); current = ""; }
+            else if (c == ',' && !inQuotes)
+            {
+                result.Add(current);
+                current = "";
+            }
             else current += c;
         }
+
         result.Add(current);
         return result;
     }
@@ -232,6 +297,7 @@ public class ExcelManager : MonoBehaviour
             value = num > 1f ? num / 100f : num;
             return true;
         }
+
         value = 0f;
         return false;
     }

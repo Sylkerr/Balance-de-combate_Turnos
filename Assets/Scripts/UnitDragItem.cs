@@ -4,7 +4,7 @@ using UnityEngine.EventSystems;
 public class UnitDragItem : MonoBehaviour, IBeginDragHandler, IDragHandler, IEndDragHandler
 {
     public string nombreUnidadKey;
-    public int idJugadorPropietario; // 1 = Aliada (Izquierda), 2 = Enemiga (Derecha)
+    public int idJugadorPropietario; // 1 = Aliada, 2 = Enemiga
 
     private GameObject objetoFantasma3D;
     private GridTile ultimaCasillaResaltada;
@@ -15,7 +15,7 @@ public class UnitDragItem : MonoBehaviour, IBeginDragHandler, IDragHandler, IEnd
             BattlePrototypeManager.Instance.EstadoActual != BattlePrototypeManager.EstadoPartida.Colocacion)
             return;
 
-        // Crear una c·psula semitransparente que sigue al ratÛn sobre el tablero
+        // Crear una c√°psula semitransparente que sigue al rat√≥n sobre el tablero
         objetoFantasma3D = GameObject.CreatePrimitive(PrimitiveType.Capsule);
         objetoFantasma3D.name = "Preview_Arrastre";
         Destroy(objetoFantasma3D.GetComponent<Collider>()); // Sin collider para no bloquear el Raycast
@@ -24,31 +24,41 @@ public class UnitDragItem : MonoBehaviour, IBeginDragHandler, IDragHandler, IEnd
         Renderer rend = objetoFantasma3D.GetComponent<Renderer>();
         if (rend != null)
         {
-            rend.material.color = idJugadorPropietario == 1 ? new Color(0f, 0.8f, 1f, 0.6f) : new Color(1f, 0.3f, 0.6f, 0.6f);
+            rend.material.color = idJugadorPropietario == 1 ? new Color(1f, 1f, 1f, 0.6f) : new Color(0.08f, 0.08f, 0.08f, 0.6f);
         }
     }
 
     public void OnDrag(PointerEventData eventData)
     {
-        if (objetoFantasma3D == null) return;
+        if (objetoFantasma3D == null || BattlePrototypeManager.Instance == null) return;
 
         Ray ray = Camera.main.ScreenPointToRay(eventData.position);
-        if (Physics.Raycast(ray, out RaycastHit hit, 100f))
+        int mascara = BattlePrototypeManager.Instance.MascaraCasillas;
+
+        // 1) Casilla bajo el cursor (solo cuenta la capa de casillas: el decorado no estorba)
+        GridTile tile = null;
+        if (Physics.Raycast(ray, out RaycastHit hitTile, 200f, mascara, QueryTriggerInteraction.Collide))
         {
-            objetoFantasma3D.transform.position = hit.point + Vector3.up * 0.6f;
+            tile = hitTile.collider.GetComponentInParent<GridTile>();
+            objetoFantasma3D.transform.position = hitTile.point + Vector3.up * 0.6f;
+        }
+        // 2) Si no hay casilla, el fantasma sigue al rat√≥n sobre lo que haya
+        else if (Physics.Raycast(ray, out RaycastHit hitAny, 200f))
+        {
+            objetoFantasma3D.transform.position = hitAny.point + Vector3.up * 0.6f;
+        }
 
-            GridTile tile = hit.collider.GetComponent<GridTile>();
-            if (ultimaCasillaResaltada != null && ultimaCasillaResaltada != tile)
-            {
-                ultimaCasillaResaltada.Resaltar(false, false);
-            }
+        if (ultimaCasillaResaltada != null && ultimaCasillaResaltada != tile)
+        {
+            ultimaCasillaResaltada.Resaltar(false, false);
+            ultimaCasillaResaltada = null;
+        }
 
-            if (tile != null)
-            {
-                bool esValida = (tile.idPropietarioCasilla == idJugadorPropietario) && !tile.EstaOcupada;
-                tile.Resaltar(true, esValida);
-                ultimaCasillaResaltada = tile;
-            }
+        if (tile != null)
+        {
+            bool esValida = (tile.idPropietarioCasilla == idJugadorPropietario) && !tile.EstaOcupada;
+            tile.Resaltar(true, esValida);
+            ultimaCasillaResaltada = tile;
         }
     }
 
@@ -70,9 +80,9 @@ public class UnitDragItem : MonoBehaviour, IBeginDragHandler, IDragHandler, IEnd
             return;
 
         Ray ray = Camera.main.ScreenPointToRay(eventData.position);
-        if (Physics.Raycast(ray, out RaycastHit hit, 100f))
+        if (Physics.Raycast(ray, out RaycastHit hit, 200f, BattlePrototypeManager.Instance.MascaraCasillas, QueryTriggerInteraction.Collide))
         {
-            GridTile tile = hit.collider.GetComponent<GridTile>();
+            GridTile tile = hit.collider.GetComponentInParent<GridTile>();
             if (tile != null)
             {
                 BattlePrototypeManager.Instance.IntentarColocarUnidadPorDrag(tile, nombreUnidadKey, idJugadorPropietario);

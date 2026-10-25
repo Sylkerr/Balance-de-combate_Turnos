@@ -8,7 +8,7 @@ public class UnitStats : MonoBehaviour
     public string rol;
     public string tipoAtaque;
 
-    [Header("Estad�sticas (Desde Google Sheets)")]
+    [Header("Estadísticas (Desde Google Sheets)")]
     public float danoAtaque;
     public float vidaMaxima;
     public float vidaActual;
@@ -18,9 +18,13 @@ public class UnitStats : MonoBehaviour
     [Range(0f, 1f)] public float defensaMagica;
 
     [Header("Estado en Partida")]
-    public int idJugador = 1; // 1 = Base Aliada (Izquierda), 2 = Base Enemiga (Derecha)
+    public int idJugador = 1; // 1 = Base Aliada, 2 = Base Enemiga
     public GridTile casillaAsignada;
     public bool EstaVivo => vidaActual > 0f;
+
+    // Cuántas unidades cuerpo a cuerpo tienen ahora mismo a esta unidad como objetivo.
+    // Se usa para repartir a los atacantes en vez de apelotonarlos todos sobre el mismo enemigo.
+    [HideInInspector] public int atacantesActuales;
 
     public void InicializarDesdeDatos(ExcelManager.UnitData data, int propietario)
     {

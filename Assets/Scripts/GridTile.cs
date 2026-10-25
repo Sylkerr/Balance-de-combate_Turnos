@@ -8,18 +8,29 @@ public class GridTile : MonoBehaviour
     public UnitStats unidadEnCasilla;
 
     private Renderer miRenderer;
-    private Color colorOriginal;
+    private Color colorOriginal = Color.white;
 
     public bool EstaOcupada => unidadEnCasilla != null && unidadEnCasilla.EstaVivo;
 
-    public void InicializarCasilla(int propietario, int f, int c, Color colorBase)
+    /// <param name="tintar">Si es false se respeta el material/color que ya tenga la casilla.</param>
+    public void InicializarCasilla(int propietario, int f, int c, Color colorBase, bool tintar = true)
     {
         idPropietarioCasilla = propietario;
         fila = f;
         columna = c;
-        colorOriginal = colorBase;
-        miRenderer = GetComponent<Renderer>();
-        if (miRenderer != null) miRenderer.material.color = colorOriginal;
+        miRenderer = GetComponentInChildren<Renderer>();
+
+        if (miRenderer == null) return;
+
+        if (tintar)
+        {
+            colorOriginal = colorBase;
+            miRenderer.material.color = colorOriginal;
+        }
+        else
+        {
+            colorOriginal = miRenderer.material.color;
+        }
     }
 
     public void Resaltar(bool activo, bool esValida)
