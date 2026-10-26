@@ -291,7 +291,7 @@ public class BattlePrototypeManager : MonoBehaviour
     }
 
     // =========================================================
-    // 2. COLOCACIÓN DE UNIDADES POR DRAG & DROP (MÁX 9 POR BANDO)
+    // 2. COLOCACIÓN DE UNIDADES POR DRAG & DROP (MÁX 12 POR BANDO)
     // =========================================================
     public void IntentarColocarUnidadPorDrag(GridTile casilla, string unitKey, int idJugador)
     {
@@ -344,12 +344,13 @@ public class BattlePrototypeManager : MonoBehaviour
         stats.InicializarDesdeDatos(datosUnidad, idJugador);
         stats.casillaAsignada = casilla;
 
+        nuevaUnidad.AddComponent<UnitHealthBar>(); // Después de UnitStats, que es de donde lee la vida
         nuevaUnidad.AddComponent<UnitCombatAI>();
 
         casilla.unidadEnCasilla = stats;
         unidadesEnTablero.Add(stats);
 
-        ActualizarTextoEstado($"Unidad colocada: {datosUnidad.nombre} (J{idJugador}) | Aliadas: {ContarUnidadesVivas(1)}/9 - Enemigas: {ContarUnidadesVivas(2)}/9");
+        ActualizarTextoEstado($"Unidad colocada: {datosUnidad.nombre} (J{idJugador}) | Aliadas: {ContarUnidadesVivas(1)}/12 - Enemigas: {ContarUnidadesVivas(2)}/12");
     }
 
     // =========================================================
@@ -634,7 +635,7 @@ public class BattlePrototypeManager : MonoBehaviour
 
     void PoblarListasUI()
     {
-        ActualizarTextoEstado("Arrastra hasta 9 unidades desde ambos paneles hacia cada cuadrícula y pulsa PELEAR.");
+        ActualizarTextoEstado("Arrastra hasta 12 unidades desde ambos paneles hacia cada cuadrícula y pulsa PELEAR.");
 
         LimpiarHijos(contenedorListaJ1);
         LimpiarHijos(contenedorListaJ2);
