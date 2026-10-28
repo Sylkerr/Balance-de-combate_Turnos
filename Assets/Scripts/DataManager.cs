@@ -2,41 +2,45 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Text.RegularExpressions;
 using UnityEngine;
 using UnityEngine.Networking;
 
+/// <summary>
+/// Descarga la hoja "BALANCEO DE SISTEMAS" (Hoja 2) de Google Sheets y la convierte en una lista de unidades.
+/// Columnas que se leen (se localizan por el texto de la cabecera): Nombre | Daño de ataque | Vida | Cadencia | Alcance | Poder Combate.
+/// </summary>
 public class ExcelManager : MonoBehaviour
 {
     public static ExcelManager Instance { get; private set; }
 
     [Header("URL de tu Google Sheets")] [SerializeField]
     private string csvUrl =
-        "https://docs.google.com/spreadsheets/d/1skunAahwbC_x-WSd5KPmifCHFmGFpmf_tz8SIGo7gFI/edit?gid=0#gid=0";
+        "https://docs.google.com/spreadsheets/d/1skunAahwbC_x-WSd5KPmifCHFmGFpmf_tz8SIGo7gFI/edit?gid=278273004#gid=278273004";
+
+    [Tooltip("gid de la pestaña a leer (Hoja 2). Si se deja vacío se usa el gid que venga en la URL.")] [SerializeField]
+    private string gidHoja = "278273004";
 
     [Serializable]
     public class UnitData
     {
-        public string faccion;
         public string nombre;
-        public string rol;
-        public string tipoAtaque;
         public float danoAtaque;
         public float vida;
-        public float velocidadAtaque;
-        public float alcance;
-        public float defensaFisica;
-        public float defensaMagica;
-        public float poderCombate; // Columna "Poder de combate" del Excel (0 si no hay dato)
+        public float cadencia;    // Segundos entre ataque y ataque
+        public float alcance;     // Metros de Unity
+        public float poderExcel;  // Columna "Poder Combate" tal cual viene en el Excel (0 si no hay dato)
+
+        public float DanoPorSegundo => danoAtaque / Mathf.Max(0.01f, cadencia);
+
+        /// <summary>Misma fórmula que el Excel: Daño × Vida × Alcance / Cadencia.</summary>
+        public float PoderCalculado => danoAtaque * vida * alcance / Mathf.Max(0.01f, cadencia);
+
+        public float Poder => poderExcel > 0f ? poderExcel : PoderCalculado;
     }
 
     public Dictionary<string, UnitData> UnidadesPorNombre = new Dictionary<string, UnitData>();
     public List<UnitData> ListaUnidades = new List<UnitData>();
-
-    private Dictionary<string, Dictionary<string, float>> matrizFacciones =
-        new Dictionary<string, Dictionary<string, float>>();
-
-    // Si no se encuentra la cabecera "Poder de combate", se asume esta columna (L, índice 11)
-    private const int COLUMNA_PODER_POR_DEFECTO = 11;
 
     public bool DatosCargados { get; private set; } = false;
     public event Action OnDatosCargados;
@@ -63,11 +67,16 @@ public class ExcelManager : MonoBehaviour
         if (string.IsNullOrWhiteSpace(rawUrl)) return "";
         if (rawUrl.Contains("/export?format=csv")) return rawUrl;
 
+        string gid = gidHoja;
+        if (string.IsNullOrWhiteSpace(gid))
+        {
+            Match m = Regex.Match(rawUrl, @"gid=(\d+)");
+            gid = m.Success ? m.Groups[1].Value : "0";
+        }
+
         int editIndex = rawUrl.IndexOf("/edit");
         if (editIndex > 0)
-        {
-            return rawUrl.Substring(0, editIndex) + "/export?format=csv&gid=0";
-        }
+            return rawUrl.Substring(0, editIndex) + "/export?format=csv&gid=" + gid.Trim();
 
         return rawUrl;
     }
@@ -96,168 +105,75 @@ public class ExcelManager : MonoBehaviour
     {
         UnidadesPorNombre.Clear();
         ListaUnidades.Clear();
-        matrizFacciones.Clear();
 
-        Dictionary<string, UnitData> respaldoPorRol = new Dictionary<string, UnitData>();
         string[] lines = csvData.Split(new char[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
-        List<string> ordenColumnasFacciones = new List<string>();
-        bool leyendoTablaFacciones = false;
-        int colPoder = -1; // Se rellena al encontrar la cabecera "Poder de combate"
+        List<List<string>> filas = new List<List<string>>();
+        foreach (string l in lines) filas.Add(SplitCSVLine(l));
 
-        for (int i = 0; i < lines.Length; i++)
+        // Columnas por defecto (B..G) por si no se encuentra la cabecera
+        int colNombre = 1, colDano = 2, colVida = 3, colCadencia = 4, colAlcance = 5, colPoder = 6;
+        foreach (var f in filas)
         {
-            List<string> fields = SplitCSVLine(lines[i]);
-            if (fields.Count < 6) continue;
+            int idxNombre = f.FindIndex(c => c.Trim().Equals("Nombre", StringComparison.OrdinalIgnoreCase));
+            if (idxNombre < 0) continue;
 
-            string colB = fields[1].Trim();
-            string colC = fields[2].Trim();
-
-            if (colB.Equals("FACCIONES", StringComparison.OrdinalIgnoreCase))
-            {
-                leyendoTablaFacciones = true;
-                continue;
-            }
-
-            if (!leyendoTablaFacciones)
-            {
-                bool esCabecera = colB.StartsWith("Facci", StringComparison.OrdinalIgnoreCase);
-
-                if (string.IsNullOrEmpty(colB) || esCabecera || colB.Contains("BALANCEO"))
-                {
-                    // En la cabecera de la tabla de unidades localizamos la columna "Poder de combate"
-                    if (esCabecera) colPoder = BuscarColumnaPoder(fields);
-                    continue;
-                }
-
-                if (fields.Count >= 11 && !string.IsNullOrEmpty(colC))
-                {
-                    string rol = fields[3].Trim();
-                    string rolKey = rol.ToLowerInvariant();
-
-                    bool tieneDano = TryParseFloat(fields[5], out float dano);
-                    bool tieneVida = TryParseFloat(fields[6], out float vida);
-                    bool tieneStats = tieneDano && tieneVida && vida > 0f;
-                    TryParseFloat(fields[7], out float velAtaque);
-                    TryParseFloat(fields[8], out float alcance);
-                    TryParsePercentage(fields[9], out float defFisica);
-                    TryParsePercentage(fields[10], out float defMagica);
-
-                    float poder = 0f;
-                    int idxPoder = colPoder >= 0 ? colPoder : COLUMNA_PODER_POR_DEFECTO;
-                    if (idxPoder < fields.Count) TryParseFloat(fields[idxPoder], out poder);
-
-                    // Si las celdas aún están vacías en el Excel, usa temporalmente las del mismo Rol
-                    if (!tieneStats && respaldoPorRol.TryGetValue(rolKey, out UnitData baseRol))
-                    {
-                        dano = baseRol.danoAtaque;
-                        vida = baseRol.vida;
-                        velAtaque = baseRol.velocidadAtaque;
-                        alcance = baseRol.alcance;
-                        defFisica = baseRol.defensaFisica;
-                        defMagica = baseRol.defensaMagica;
-                        if (poder <= 0f) poder = baseRol.poderCombate;
-                    }
-
-                    UnitData data = new UnitData
-                    {
-                        faccion = colB,
-                        nombre = colC,
-                        rol = rol,
-                        tipoAtaque = fields[4].Trim(),
-                        danoAtaque = dano > 0 ? dano : 10f,
-                        vida = vida > 0 ? vida : 50f,
-                        velocidadAtaque = velAtaque > 0 ? velAtaque : 1f,
-                        alcance = alcance > 0 ? alcance : 1f,
-                        defensaFisica = defFisica,
-                        defensaMagica = defMagica,
-                        poderCombate = poder
-                    };
-
-                    if (tieneStats && !respaldoPorRol.ContainsKey(rolKey))
-                        respaldoPorRol[rolKey] = data;
-
-                    string key = colC.ToLowerInvariant();
-                    UnidadesPorNombre[key] = data;
-                    ListaUnidades.Add(data);
-                }
-            }
-            else
-            {
-                // Formato lista (el de tu hoja): Atacante | multiplicador | Defensor, p. ej. "Orden | 1,5 | Caos"
-                if (!string.IsNullOrEmpty(colB) && fields.Count > 3)
-                {
-                    string colD = fields[3].Trim();
-                    if (!string.IsNullOrEmpty(colD) && TryParseFloat(colC, out float multLista) &&
-                        !TryParseFloat(colD, out _))
-                    {
-                        string atk = colB.ToLowerInvariant();
-                        if (!matrizFacciones.ContainsKey(atk))
-                            matrizFacciones[atk] = new Dictionary<string, float>();
-                        matrizFacciones[atk][colD.ToLowerInvariant()] = multLista;
-                        continue;
-                    }
-                }
-
-                // Formato matriz (cabecera con facciones en columnas)
-                if (string.IsNullOrEmpty(colB) && !string.IsNullOrEmpty(colC) &&
-                    !colC.Equals("Defensores", StringComparison.OrdinalIgnoreCase))
-                {
-                    ordenColumnasFacciones.Clear();
-                    for (int c = 2; c <= 5 && c < fields.Count; c++)
-                        ordenColumnasFacciones.Add(fields[c].Trim().ToLowerInvariant());
-                }
-                else if (!string.IsNullOrEmpty(colB) && ordenColumnasFacciones.Count > 0)
-                {
-                    string atacanteKey = colB.ToLowerInvariant();
-                    if (!matrizFacciones.ContainsKey(atacanteKey))
-                        matrizFacciones[atacanteKey] = new Dictionary<string, float>();
-
-                    for (int c = 0; c < ordenColumnasFacciones.Count; c++)
-                    {
-                        int colIndex = c + 2;
-                        if (colIndex < fields.Count && TryParseFloat(fields[colIndex], out float mult))
-                            matrizFacciones[atacanteKey][ordenColumnasFacciones[c]] = mult;
-                    }
-                }
-            }
+            colNombre = idxNombre;
+            colDano = BuscarColumna(f, colDano, "daño", "dano");
+            colVida = BuscarColumna(f, colVida, "vida");
+            colCadencia = BuscarColumna(f, colCadencia, "cadencia");
+            colAlcance = BuscarColumna(f, colAlcance, "alcance");
+            colPoder = BuscarColumna(f, colPoder, "poder");
+            break;
         }
 
-        string infoPoder = colPoder >= 0
-            ? $"columna {colPoder}"
-            : $"cabecera no encontrada, se usa la columna {COLUMNA_PODER_POR_DEFECTO}";
-        int relaciones = 0;
-        foreach (var kv in matrizFacciones) relaciones += kv.Value.Count;
+        foreach (var f in filas)
+        {
+            if (f.Count <= Mathf.Max(colNombre, colAlcance)) continue;
 
-        Debug.Log(
-            $"[ExcelManager] {ListaUnidades.Count} unidades y {relaciones} relaciones entre facciones cargadas desde Google Sheets. Poder de combate: {infoPoder}.");
+            string nombre = f[colNombre].Trim();
+            if (string.IsNullOrEmpty(nombre)) continue;
+
+            // Solo son unidades las filas con daño y vida numéricos (descarta títulos y cabeceras)
+            if (!TryParseNumero(f[colDano], out float dano) || !TryParseNumero(f[colVida], out float vida) || vida <= 0f)
+                continue;
+
+            TryParseNumero(f[colCadencia], out float cadencia);
+            TryParseNumero(f[colAlcance], out float alcance);
+            float poder = 0f;
+            if (colPoder < f.Count) TryParseNumero(f[colPoder], out poder);
+
+            UnitData data = new UnitData
+            {
+                nombre = nombre,
+                danoAtaque = dano,
+                vida = vida,
+                cadencia = cadencia > 0f ? cadencia : 1f,
+                alcance = alcance > 0f ? alcance : 1f,
+                poderExcel = poder
+            };
+
+            string key = nombre.ToLowerInvariant();
+            if (UnidadesPorNombre.ContainsKey(key)) continue;
+            UnidadesPorNombre[key] = data;
+            ListaUnidades.Add(data);
+
+            if (poder > 0f && Mathf.Abs(poder - data.PoderCalculado) > 1f)
+                Debug.LogWarning($"[ExcelManager] {nombre}: el Excel dice Poder {poder:0.##} pero Daño×Vida×Alcance/Cadencia = {data.PoderCalculado:0.##}");
+        }
+
+        Debug.Log($"[ExcelManager] {ListaUnidades.Count} unidades cargadas desde Google Sheets.");
     }
 
-    /// <summary>Busca en la fila de cabecera la columna "Poder de combate" (o, en su defecto, cualquiera que contenga "poder").</summary>
-    private int BuscarColumnaPoder(List<string> cabecera)
+    private int BuscarColumna(List<string> cabecera, int porDefecto, params string[] claves)
     {
-        int candidata = -1;
         for (int c = 0; c < cabecera.Count; c++)
         {
             string h = cabecera[c].Trim().ToLowerInvariant();
-            if (!h.Contains("poder")) continue;
-
-            if (h.Contains("combate")) return c;
-            if (candidata < 0) candidata = c;
+            foreach (string k in claves)
+                if (h.Contains(k)) return c;
         }
 
-        return candidata;
-    }
-
-    public float ObtenerMultiplicadorFaccion(string faccionAtacante, string faccionDefensora)
-    {
-        if (string.IsNullOrEmpty(faccionAtacante) || string.IsNullOrEmpty(faccionDefensora)) return 1f;
-        string atk = faccionAtacante.Trim().ToLowerInvariant();
-        string def = faccionDefensora.Trim().ToLowerInvariant();
-
-        if (matrizFacciones.TryGetValue(atk, out var dictDef) && dictDef.TryGetValue(def, out float mult))
-            return mult;
-
-        return 1f;
+        return porDefecto;
     }
 
     private List<string> SplitCSVLine(string line)
@@ -282,23 +198,20 @@ public class ExcelManager : MonoBehaviour
         return result;
     }
 
-    private bool TryParseFloat(string raw, out float value)
+    /// <summary>
+    /// Lee números con formato español: "1,6" = 1.6 y "1.250" = 1250 (el punto es separador de miles).
+    /// </summary>
+    public static bool TryParseNumero(string raw, out float value)
     {
         value = 0f;
         if (string.IsNullOrWhiteSpace(raw)) return false;
-        string normalized = raw.Trim().Replace("%", "").Replace(",", ".");
-        return float.TryParse(normalized, NumberStyles.Any, CultureInfo.InvariantCulture, out value);
-    }
+        string s = raw.Trim().Replace("%", "").Replace(" ", "");
 
-    private bool TryParsePercentage(string raw, out float value)
-    {
-        if (TryParseFloat(raw, out float num))
-        {
-            value = num > 1f ? num / 100f : num;
-            return true;
-        }
+        if (s.Contains(","))
+            s = s.Replace(".", "").Replace(",", ".");
+        else if (Regex.IsMatch(s, @"^-?\d{1,3}(\.\d{3})+$"))
+            s = s.Replace(".", "");
 
-        value = 0f;
-        return false;
+        return float.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out value);
     }
 }

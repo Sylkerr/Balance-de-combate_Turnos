@@ -1,5 +1,7 @@
-using System.Collections;
 using System.Collections.Generic;
+using System.Globalization;
+using System.IO;
+using System.Text;
 using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.SceneManagement;
@@ -30,8 +32,8 @@ public class BattlePrototypeManager : MonoBehaviour
     [Header("Combate en área")]
     [Tooltip("Máximo de unidades cuerpo a cuerpo que pueden atacar a la vez al mismo enemigo (evita el apelotonamiento).")]
     public int maxAtacantesPorObjetivo = 3;
-    [Tooltip("Las unidades con alcance <= a este valor cuentan como cuerpo a cuerpo.")]
-    public float alcanceMaxCuerpoACuerpo = 2f;
+    [Tooltip("Las unidades con alcance <= a este valor atacan cuerpo a cuerpo; el resto dispara proyectiles.")]
+    public float alcanceMaxCuerpoACuerpo = 1.5f;
     [Tooltip("Solo se atacan enemigos que estén dentro de la arena (más el margen).")]
     public bool limitarCombateAlArea = true;
     public float margenArea = 1.5f;
@@ -39,11 +41,27 @@ public class BattlePrototypeManager : MonoBehaviour
     public int MascaraCasillas => layout != null ? layout.capaCasillas.value : ~0;
 
     private List<UnitStats> unidadesEnTablero = new List<UnitStats>();
+    private List<GridTile> casillas = new List<GridTile>();
     private int equipoGanador = 0;
+    private float tiempoInicioCombate;
+    private float duracionCombate;
+
+    // Composición del último combate, para poder repetirlo tras recargar la escena
+    private struct Colocacion { public string unidad; public int jugador, fila, columna; }
+    private static List<Colocacion> composicionGuardada = new List<Colocacion>();
+    private static bool repetirAlCargar;
+
+    private static readonly CultureInfo es = new CultureInfo("es-ES");
 
     // Referencias de UI generada automáticamente
     private Text textoEstadoSuperior;
     private Button botonIniciarCombate;
+    private Text textoPrediccion;
+    private Text textoEquipoJ1;
+    private Text textoEquipoJ2;
+    private Text textoResultado;
+    private GameObject botonesFinales;
+    private float temporizadorUI;
 
     void Awake()
     {
@@ -64,7 +82,7 @@ public class BattlePrototypeManager : MonoBehaviour
         AsegurarEventSystem();
         CrearCasillas(1);
         CrearCasillas(2);
-        CrearInterfazDobleDragAndDrop();
+        CrearInterfaz();
 
         if (ExcelManager.Instance != null)
         {
@@ -78,8 +96,13 @@ public class BattlePrototypeManager : MonoBehaviour
     void Update()
     {
         if (EstadoActual == EstadoPartida.MarchaVictoria)
-        {
             ComprobarLlegadaAlLadoEnemigo();
+
+        temporizadorUI -= Time.deltaTime;
+        if (temporizadorUI <= 0f)
+        {
+            temporizadorUI = 0.15f;
+            ActualizarPanelCombate();
         }
     }
 
@@ -105,6 +128,7 @@ public class BattlePrototypeManager : MonoBehaviour
             {
                 existentes[i].InicializarCasilla(idJugador, i / layout.columnas, i % layout.columnas, color, layout.tintarCasillas);
                 AsegurarCollider(existentes[i].gameObject);
+                casillas.Add(existentes[i]);
             }
             return;
         }
@@ -136,6 +160,7 @@ public class BattlePrototypeManager : MonoBehaviour
                 if (tile == null) tile = tileObj.AddComponent<GridTile>();
                 AsegurarCollider(tileObj);
                 tile.InicializarCasilla(idJugador, fila, col, color, layout.tintarCasillas);
+                casillas.Add(tile);
             }
         }
     }
@@ -157,36 +182,25 @@ public class BattlePrototypeManager : MonoBehaviour
     }
 
     // =========================================================
-    // ACCESORIOS VISUALES POR ROL
-    // (las medidas están en unidades locales de la cápsula: radio 0.5, altura 2)
+    // MODELO DE CADA UNIDAD (cápsula + accesorios según su nombre en el Excel)
+    // Las medidas están en unidades locales de la cápsula: radio 0.5, altura 2
     // =========================================================
-    [Header("Accesorios por rol")]
-    [Tooltip("Los tanques se crean con este factor de tamaño respecto al resto.")]
-    public float factorEscalaTanque = 1.25f;
-
     private static Mesh mallaCono;
 
-    static bool EsRol(string rol, params string[] claves)
+    static bool EsUnidad(string nombre, params string[] claves)
     {
-        if (string.IsNullOrEmpty(rol)) return false;
-        string r = rol.ToLowerInvariant();
+        if (string.IsNullOrEmpty(nombre)) return false;
+        string n = nombre.ToLowerInvariant();
         foreach (string c in claves)
-            if (r.Contains(c)) return true;
+            if (n.Contains(c)) return true;
         return false;
     }
 
-    /// <summary>Orden = azul, Caos = rojo, Vida = verde, Vacío = morado. Otra facción: color por defecto del accesorio.</summary>
-    static Color ColorAccesorio(string faccion, Color porDefecto)
+    static float EscalaUnidad(string nombre)
     {
-        if (string.IsNullOrEmpty(faccion)) return porDefecto;
-        string f = faccion.Trim().ToLowerInvariant();
-
-        if (f.Contains("orden")) return new Color(0.15f, 0.4f, 1f);
-        if (f.Contains("caos")) return new Color(0.9f, 0.15f, 0.15f);
-        if (f.Contains("vida")) return new Color(0.2f, 0.8f, 0.25f);
-        if (f.Contains("vac")) return new Color(0.6f, 0.2f, 0.85f);   // Vacío / Vacio
-
-        return porDefecto;
+        if (EsUnidad(nombre, "ogro")) return 0.55f * 1.5f;
+        if (EsUnidad(nombre, "palad")) return 0.55f * 1.15f;
+        return 0.55f;
     }
 
     /// <summary>Mira desde su propia cuadrícula hacia la del rival (en una escena simétrica equivale a girar 180º al J2).</summary>
@@ -202,35 +216,87 @@ public class BattlePrototypeManager : MonoBehaviour
         return Quaternion.LookRotation(dir.normalized, Vector3.up);
     }
 
-    void AnadirAccesoriosPorRol(GameObject unidad, string rol, string faccion)
+    void AnadirAccesorios(GameObject unidad, string nombre, int idJugador)
     {
         Transform t = unidad.transform;
+        Color equipo = CombatVFX.ColorEquipo(idJugador);
+        Color metal = new Color(0.8f, 0.8f, 0.85f);
+        Color oro = new Color(1f, 0.8f, 0.25f);
+        Color madera = new Color(0.4f, 0.25f, 0.12f);
 
-        if (EsRol(rol, "mag", "mág"))
+        if (EsUnidad(nombre, "caballero"))
         {
-            // Sombrero de mago: cono sobre la cabeza
-            CrearAccesorio(t, PrimitiveType.Cube, "Sombrero", new Vector3(0f, 0.8f, 0f), Vector3.zero,
-                Vector3.one, ColorAccesorio(faccion, new Color(0.45f, 0.2f, 0.75f)), ObtenerMallaCono());
+            Espada(t, metal, 1f);
+            Escudo(t, equipo);
         }
-        else if (EsRol(rol, "luchador"))
+        else if (EsUnidad(nombre, "palad"))
         {
-            // Espada: cilindro pequeño en la mano derecha, inclinado hacia delante
-            CrearAccesorio(t, PrimitiveType.Cylinder, "Espada", new Vector3(0.65f, 0.15f, 0.3f), new Vector3(35f, 0f, 0f),
-                new Vector3(0.12f, 0.6f, 0.12f), ColorAccesorio(faccion, new Color(0.8f, 0.8f, 0.85f)));
+            Espada(t, oro, 1.25f);
+            Escudo(t, oro);
+            Aureola(t, oro);
         }
-        else if (EsRol(rol, "tanque", "tank"))
+        else if (EsUnidad(nombre, "mago"))
         {
-            // Manos: dos cubos pequeños a los lados
-            Color piel = ColorAccesorio(faccion, new Color(0.9f, 0.75f, 0.6f));
-            CrearAccesorio(t, PrimitiveType.Cube, "Mano_Izq", new Vector3(-0.62f, 0f, 0.35f), Vector3.zero, Vector3.one * 0.28f, piel);
-            CrearAccesorio(t, PrimitiveType.Cube, "Mano_Der", new Vector3(0.62f, 0f, 0.35f), Vector3.zero, Vector3.one * 0.28f, piel);
+            CrearAccesorio(t, PrimitiveType.Cube, "Sombrero", new Vector3(0f, 0.8f, 0f), Vector3.zero, Vector3.one, equipo, ObtenerMallaCono());
+            Baston(t, madera);
         }
-        else if (EsRol(rol, "arquero", "archer"))
+        else if (EsUnidad(nombre, "sacerdote"))
         {
-            // Rifle: cubo largo apuntando hacia delante
+            Baston(t, Color.white);
+            Aureola(t, oro);
+        }
+        else if (EsUnidad(nombre, "cultista"))
+        {
+            CrearAccesorio(t, PrimitiveType.Cube, "Capucha", new Vector3(0f, 0.55f, 0f), Vector3.zero, new Vector3(1.1f, 0.95f, 1.1f),
+                new Color(0.3f, 0.05f, 0.35f), ObtenerMallaCono());
+            Espada(t, new Color(0.5f, 0.1f, 0.1f), 0.6f); // Daga
+        }
+        else if (EsUnidad(nombre, "mosquet"))
+        {
             CrearAccesorio(t, PrimitiveType.Cube, "Rifle", new Vector3(0.45f, 0.1f, 0.55f), Vector3.zero,
-                new Vector3(0.12f, 0.14f, 1.3f), ColorAccesorio(faccion, new Color(0.3f, 0.2f, 0.1f)));
+                new Vector3(0.12f, 0.14f, 1.3f), madera);
         }
+        else if (EsUnidad(nombre, "arquero"))
+        {
+            CrearAccesorio(t, PrimitiveType.Cube, "Arco", new Vector3(-0.5f, 0.1f, 0.45f), Vector3.zero,
+                new Vector3(0.08f, 1.2f, 0.1f), madera);
+        }
+        else if (EsUnidad(nombre, "ogro"))
+        {
+            Color piel = new Color(0.45f, 0.6f, 0.3f);
+            CrearAccesorio(t, PrimitiveType.Cube, "Mano_Izq", new Vector3(-0.65f, 0f, 0.35f), Vector3.zero, Vector3.one * 0.35f, piel);
+            CrearAccesorio(t, PrimitiveType.Cube, "Mano_Der", new Vector3(0.65f, 0f, 0.35f), Vector3.zero, Vector3.one * 0.35f, piel);
+        }
+        else
+        {
+            // Tropa Base y cualquier unidad nueva del Excel: espada sencilla
+            Espada(t, metal, 0.8f);
+        }
+
+        // Aro del color del equipo en los pies para distinguir los bandos de un vistazo
+        CrearAccesorio(t, PrimitiveType.Cylinder, "Aro_Equipo", new Vector3(0f, -0.98f, 0f), Vector3.zero,
+            new Vector3(1.5f, 0.02f, 1.5f), equipo);
+    }
+
+    void Espada(Transform t, Color color, float tamano)
+    {
+        CrearAccesorio(t, PrimitiveType.Cylinder, "Espada", new Vector3(0.65f, 0.15f, 0.3f), new Vector3(35f, 0f, 0f),
+            new Vector3(0.12f, 0.6f * tamano, 0.12f), color);
+    }
+
+    void Escudo(Transform t, Color color)
+    {
+        CrearAccesorio(t, PrimitiveType.Cube, "Escudo", new Vector3(-0.6f, 0f, 0.3f), Vector3.zero, new Vector3(0.12f, 0.75f, 0.6f), color);
+    }
+
+    void Baston(Transform t, Color color)
+    {
+        CrearAccesorio(t, PrimitiveType.Cylinder, "Baston", new Vector3(0.6f, 0.1f, 0.25f), Vector3.zero, new Vector3(0.08f, 0.9f, 0.08f), color);
+    }
+
+    void Aureola(Transform t, Color color)
+    {
+        CrearAccesorio(t, PrimitiveType.Cylinder, "Aureola", new Vector3(0f, 1.3f, 0f), Vector3.zero, new Vector3(0.6f, 0.02f, 0.6f), color);
     }
 
     GameObject CrearAccesorio(Transform padre, PrimitiveType tipo, string nombre, Vector3 posLocal, Vector3 rotEuler,
@@ -291,7 +357,7 @@ public class BattlePrototypeManager : MonoBehaviour
     }
 
     // =========================================================
-    // 2. COLOCACIÓN DE UNIDADES POR DRAG & DROP (MÁX 12 POR BANDO)
+    // 2. COLOCACIÓN DE UNIDADES POR DRAG & DROP
     // =========================================================
     public void IntentarColocarUnidadPorDrag(GridTile casilla, string unitKey, int idJugador)
     {
@@ -309,8 +375,7 @@ public class BattlePrototypeManager : MonoBehaviour
             return;
         }
 
-        int unidadesEquipo = ContarUnidadesVivas(idJugador);
-        if (unidadesEquipo >= maxUnidadesPorEquipo)
+        if (ContarUnidadesVivas(idJugador) >= maxUnidadesPorEquipo)
         {
             Debug.LogWarning($"El Jugador {idJugador} ya tiene el máximo de {maxUnidadesPorEquipo} unidades colocadas.");
             return;
@@ -324,7 +389,7 @@ public class BattlePrototypeManager : MonoBehaviour
 
         GameObject nuevaUnidad = GameObject.CreatePrimitive(PrimitiveType.Capsule);
         nuevaUnidad.name = $"{datosUnidad.nombre}_J{idJugador}";
-        float escala = EsRol(datosUnidad.rol, "tanque", "tank") ? 0.55f * factorEscalaTanque : 0.55f;
+        float escala = EscalaUnidad(datosUnidad.nombre);
         nuevaUnidad.transform.position = casilla.transform.position + Vector3.up * (alturaUnidadSobreCasilla + (escala - 0.55f));
         nuevaUnidad.transform.localScale = new Vector3(escala, escala, escala);
         nuevaUnidad.transform.rotation = RotacionMirandoAlRival(idJugador);
@@ -337,7 +402,7 @@ public class BattlePrototypeManager : MonoBehaviour
         if (rend != null)
             rend.material.color = (idJugador == 1) ? Color.white : new Color(0.08f, 0.08f, 0.08f);
 
-        AnadirAccesoriosPorRol(nuevaUnidad, datosUnidad.rol, datosUnidad.faccion);
+        AnadirAccesorios(nuevaUnidad, datosUnidad.nombre, idJugador);
         nuevaUnidad.AddComponent<UnitAttackAnimator>(); // Debe ir después de crear los accesorios
 
         UnitStats stats = nuevaUnidad.AddComponent<UnitStats>();
@@ -350,7 +415,8 @@ public class BattlePrototypeManager : MonoBehaviour
         casilla.unidadEnCasilla = stats;
         unidadesEnTablero.Add(stats);
 
-        ActualizarTextoEstado($"Unidad colocada: {datosUnidad.nombre} (J{idJugador}) | Aliadas: {ContarUnidadesVivas(1)}/12 - Enemigas: {ContarUnidadesVivas(2)}/12");
+        ActualizarTextoEstado($"Unidad colocada: {datosUnidad.nombre} (J{idJugador}) | Aliadas: {ContarUnidadesVivas(1)}/{maxUnidadesPorEquipo} - Enemigas: {ContarUnidadesVivas(2)}/{maxUnidadesPorEquipo}");
+        ActualizarPanelCombate();
     }
 
     // =========================================================
@@ -366,7 +432,10 @@ public class BattlePrototypeManager : MonoBehaviour
             return;
         }
 
+        GuardarComposicion();
+
         EstadoActual = EstadoPartida.Combate;
+        tiempoInicioCombate = Time.time;
         if (botonIniciarCombate != null) botonIniciarCombate.interactable = false;
 
         // Cada unidad recibe su propio punto dentro de su mitad de la arena
@@ -421,30 +490,34 @@ public class BattlePrototypeManager : MonoBehaviour
 
     public void NotificarMuerteUnidad(UnitStats unidadMuerta)
     {
+        unidadMuerta.segundoMuerte = Time.time - tiempoInicioCombate;
         unidadMuerta.gameObject.SetActive(false);
+
+        // Un proyectil disparado antes de acabar puede llegar durante la marcha: ya no cambia el resultado
+        if (EstadoActual != EstadoPartida.Combate) return;
 
         int vivasJ1 = ContarUnidadesVivas(1);
         int vivasJ2 = ContarUnidadesVivas(2);
 
-        if (vivasJ1 > 0 && vivasJ2 == 0)
-        {
-            IniciarMarchaVictoria(1);
-        }
-        else if (vivasJ2 > 0 && vivasJ1 == 0)
-        {
-            IniciarMarchaVictoria(2);
-        }
-        else if (vivasJ1 == 0 && vivasJ2 == 0)
+        if (vivasJ1 > 0 && vivasJ2 > 0) return;
+
+        duracionCombate = Time.time - tiempoInicioCombate;
+        equipoGanador = vivasJ1 > 0 ? 1 : vivasJ2 > 0 ? 2 : 0;
+        MostrarResultado();
+
+        if (equipoGanador == 0)
         {
             EstadoActual = EstadoPartida.Finalizado;
-            ActualizarTextoEstado("¡EMPATE! Reiniciando escena...");
-            StartCoroutine(ReiniciarEscenaTrasSegundos(2.5f));
+            ActualizarTextoEstado("¡EMPATE! Los dos bandos han caído.");
+        }
+        else
+        {
+            IniciarMarchaVictoria(equipoGanador);
         }
     }
 
     void IniciarMarchaVictoria(int ganador)
     {
-        equipoGanador = ganador;
         EstadoActual = EstadoPartida.MarchaVictoria;
         string nombreBando = ganador == 1 ? "BASE ALIADA (J1)" : "BASE ENEMIGA (J2)";
         ActualizarTextoEstado($"¡{nombreBando} HA DERROTADO AL RIVAL! Marchando hacia la base rival...");
@@ -459,34 +532,18 @@ public class BattlePrototypeManager : MonoBehaviour
 
     void ComprobarLlegadaAlLadoEnemigo()
     {
-        bool todasCruzaron = true;
-
         foreach (UnitStats u in unidadesEnTablero)
         {
             if (u != null && u.EstaVivo && u.idJugador == equipoGanador)
             {
                 UnitCombatAI ai = u.GetComponent<UnitCombatAI>();
-                if (ai != null && !ai.HaCruzadoPuenteEnemigo)
-                {
-                    todasCruzaron = false;
-                    break;
-                }
+                if (ai != null && !ai.HaCruzadoPuenteEnemigo) return;
             }
         }
 
-        if (todasCruzaron)
-        {
-            EstadoActual = EstadoPartida.Finalizado;
-            string nombreBando = equipoGanador == 1 ? "JUGADOR 1 (BASE ALIADA)" : "JUGADOR 2 (BASE ENEMIGA)";
-            ActualizarTextoEstado($"🏆 ¡VICTORIA DEL {nombreBando}! Reiniciando partida...");
-            StartCoroutine(ReiniciarEscenaTrasSegundos(2.5f));
-        }
-    }
-
-    IEnumerator ReiniciarEscenaTrasSegundos(float segundos)
-    {
-        yield return new WaitForSeconds(segundos);
-        SceneManager.LoadScene(SceneManager.GetActiveScene().buildIndex);
+        EstadoActual = EstadoPartida.Finalizado;
+        string nombreBando = equipoGanador == 1 ? "JUGADOR 1 (BASE ALIADA)" : "JUGADOR 2 (BASE ENEMIGA)";
+        ActualizarTextoEstado($"🏆 ¡VICTORIA DEL {nombreBando}!");
     }
 
     int ContarUnidadesVivas(int idJugador)
@@ -500,8 +557,198 @@ public class BattlePrototypeManager : MonoBehaviour
         return cuenta;
     }
 
+    // ---------------------------------------------------------
+    // Repetir el mismo combate / empezar uno nuevo
+    // ---------------------------------------------------------
+    void GuardarComposicion()
+    {
+        composicionGuardada.Clear();
+        foreach (UnitStats u in unidadesEnTablero)
+        {
+            if (u == null || u.casillaAsignada == null) continue;
+            composicionGuardada.Add(new Colocacion
+            {
+                unidad = u.nombreUnidad.ToLowerInvariant(),
+                jugador = u.idJugador,
+                fila = u.casillaAsignada.fila,
+                columna = u.casillaAsignada.columna
+            });
+        }
+    }
+
+    public void RepetirCombate()
+    {
+        repetirAlCargar = true;
+        RecargarEscena();
+    }
+
+    public void NuevaPrueba()
+    {
+        repetirAlCargar = false;
+        RecargarEscena();
+    }
+
+    static void RecargarEscena()
+    {
+        Scene escena = SceneManager.GetActiveScene();
+#if UNITY_EDITOR
+        // En el editor funciona aunque la escena no esté añadida a Build Settings
+        UnityEditor.SceneManagement.EditorSceneManager.LoadSceneInPlayMode(escena.path, new LoadSceneParameters(LoadSceneMode.Single));
+#else
+        SceneManager.LoadScene(escena.buildIndex);
+#endif
+    }
+
+    void RecolocarComposicionGuardada()
+    {
+        repetirAlCargar = false;
+        foreach (Colocacion c in composicionGuardada)
+        {
+            GridTile tile = casillas.Find(t => t.idPropietarioCasilla == c.jugador && t.fila == c.fila && t.columna == c.columna);
+            if (tile != null) IntentarColocarUnidadPorDrag(tile, c.unidad, c.jugador);
+        }
+        ActualizarTextoEstado("Combate anterior recolocado. Pulsa PELEAR para repetirlo.");
+    }
+
     // =========================================================
-    // 4. CREACIÓN AUTOMÁTICA DE LAS 2 UI LATERALES (DRAG & DROP)
+    // 4. PREDICCIÓN DEL EXCEL vs RESULTADO REAL
+    // =========================================================
+    struct ResumenEquipo
+    {
+        public int unidades, vivas;
+        public float poder, dps, vidaMax, vidaActual, danoHecho;
+    }
+
+    ResumenEquipo Resumir(int idJugador)
+    {
+        ResumenEquipo r = new ResumenEquipo();
+        foreach (UnitStats u in unidadesEnTablero)
+        {
+            if (u == null || u.idJugador != idJugador) continue;
+            r.unidades++;
+            if (u.EstaVivo) r.vivas++;
+            r.poder += u.poder;
+            r.dps += u.DanoPorSegundo;
+            r.vidaMax += u.vidaMaxima;
+            r.vidaActual += Mathf.Max(0f, u.vidaActual);
+            r.danoHecho += u.danoInfligido;
+        }
+        return r;
+    }
+
+    /// <summary>Predicción del Excel: gana el bando con más Poder Combate sumado.</summary>
+    int GanadorPredicho(out ResumenEquipo j1, out ResumenEquipo j2)
+    {
+        j1 = Resumir(1);
+        j2 = Resumir(2);
+        if (Mathf.Approximately(j1.poder, j2.poder)) return 0;
+        return j1.poder > j2.poder ? 1 : 2;
+    }
+
+    static string N(float v, string formato = "#,0.##") => v.ToString(formato, es);
+
+    void ActualizarPanelCombate()
+    {
+        if (textoPrediccion == null) return;
+
+        int predicho = GanadorPredicho(out var j1, out var j2);
+        string txtPred = predicho == 0 ? "EMPATE" : $"GANA J{predicho}";
+        textoPrediccion.text =
+            $"<b>PREDICCIÓN DEL EXCEL</b>  (Poder = Daño × Vida × Alcance / Cadencia, sumado por equipo)\n" +
+            $"<color=#59BFFF>J1: {N(j1.poder)}</color>   vs   <color=#FF5A4D>J2: {N(j2.poder)}</color>   →   <b>{txtPred}</b>";
+
+        textoEquipoJ1.text = ListadoEquipo(1, j1);
+        textoEquipoJ2.text = ListadoEquipo(2, j2);
+    }
+
+    string ListadoEquipo(int idJugador, ResumenEquipo r)
+    {
+        StringBuilder sb = new StringBuilder();
+        string color = idJugador == 1 ? "#59BFFF" : "#FF5A4D";
+        sb.AppendLine($"<color={color}><b>J{idJugador}</b></color>  vivas {r.vivas}/{r.unidades} · PV {N(r.vidaActual, "0")}/{N(r.vidaMax, "0")} · DPS {N(r.dps, "0.#")} · daño hecho {N(r.danoHecho, "0")}");
+
+        foreach (UnitStats u in unidadesEnTablero)
+        {
+            if (u == null || u.idJugador != idJugador) continue;
+
+            string estado = u.EstaVivo
+                ? $"PV {N(Mathf.Max(0f, u.vidaActual), "0")}/{N(u.vidaMaxima, "0")}"
+                : $"<color=#888888>muerto ({N(u.segundoMuerte, "0.0")} s)</color>";
+
+            sb.AppendLine($"<b>{u.nombreUnidad}</b>  Dñ {N(u.danoAtaque)} · Cad {N(u.cadencia)}s · Alc {N(u.alcance)}  |  {estado}  |  hecho {N(u.danoInfligido, "0")}");
+        }
+
+        return sb.ToString();
+    }
+
+    void MostrarResultado()
+    {
+        int predicho = GanadorPredicho(out var j1, out var j2);
+        bool acierto = predicho == equipoGanador;
+        ResumenEquipo g = equipoGanador == 1 ? j1 : j2;
+        float vidaRestante = equipoGanador == 0 || g.vidaMax <= 0f ? 0f : g.vidaActual / g.vidaMax;
+
+        string ganador = equipoGanador == 0 ? "EMPATE" : $"GANA J{equipoGanador}";
+        string veredicto = acierto
+            ? "<color=#7CFF7C>EL EXCEL ACIERTA</color>"
+            : "<color=#FF8080>EL EXCEL FALLA</color>";
+
+        textoResultado.text =
+            $"<b>RESULTADO REAL: {ganador}</b> en {N(duracionCombate, "0.0")} s · vida restante del ganador {N(vidaRestante * 100f, "0")}%   {veredicto}\n" +
+            $"<size=13>Daño hecho  J1: {N(j1.danoHecho, "0")}  ·  J2: {N(j2.danoHecho, "0")}   (guardado en resultados_combate.csv)</size>";
+        textoResultado.transform.parent.gameObject.SetActive(true);
+        botonesFinales.SetActive(true);
+
+        GuardarResultadoCSV(j1, j2, predicho, vidaRestante);
+    }
+
+    string Composicion(int idJugador)
+    {
+        var cuenta = new SortedDictionary<string, int>();
+        foreach (UnitStats u in unidadesEnTablero)
+        {
+            if (u == null || u.idJugador != idJugador) continue;
+            cuenta.TryGetValue(u.nombreUnidad, out int n);
+            cuenta[u.nombreUnidad] = n + 1;
+        }
+
+        var partes = new List<string>();
+        foreach (var kv in cuenta) partes.Add($"{kv.Value}x {kv.Key}");
+        return string.Join(" + ", partes);
+    }
+
+    /// <summary>Añade una fila por combate (separada por ';' para abrirla directamente en Excel en español).</summary>
+    void GuardarResultadoCSV(ResumenEquipo j1, ResumenEquipo j2, int predicho, float vidaRestante)
+    {
+        string ruta = Path.Combine(Application.persistentDataPath, "resultados_combate.csv");
+        try
+        {
+            bool nuevo = !File.Exists(ruta);
+            using (StreamWriter w = new StreamWriter(ruta, true, new UTF8Encoding(true)))
+            {
+                if (nuevo)
+                    w.WriteLine("Fecha;Equipo J1;Poder J1;Equipo J2;Poder J2;Predicción Excel;Ganador real;Acierto;Duración (s);Vida restante ganador (%);Daño hecho J1;Daño hecho J2");
+
+                string pred = predicho == 0 ? "Empate" : $"J{predicho}";
+                string real = equipoGanador == 0 ? "Empate" : $"J{equipoGanador}";
+                w.WriteLine(string.Join(";",
+                    System.DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss"),
+                    Composicion(1), N(j1.poder, "0.##"),
+                    Composicion(2), N(j2.poder, "0.##"),
+                    pred, real, predicho == equipoGanador ? "SÍ" : "NO",
+                    N(duracionCombate, "0.0"), N(vidaRestante * 100f, "0"),
+                    N(j1.danoHecho, "0"), N(j2.danoHecho, "0")));
+            }
+            Debug.Log($"[BattleManager] Resultado guardado en {ruta}");
+        }
+        catch (IOException e)
+        {
+            Debug.LogWarning($"[BattleManager] No se pudo guardar el resultado ({e.Message}). ¿Tienes el CSV abierto en Excel?");
+        }
+    }
+
+    // =========================================================
+    // 5. INTERFAZ GENERADA POR CÓDIGO
     // =========================================================
     private Transform contenedorListaJ1;
     private Transform contenedorListaJ2;
@@ -516,7 +763,7 @@ public class BattlePrototypeManager : MonoBehaviour
         }
     }
 
-    void CrearInterfazDobleDragAndDrop()
+    void CrearInterfaz()
     {
         GameObject canvasObj = new GameObject("Canvas_Prototipo");
         Canvas canvas = canvasObj.AddComponent<Canvas>();
@@ -525,54 +772,100 @@ public class BattlePrototypeManager : MonoBehaviour
         scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
         scaler.referenceResolution = new Vector2(1920, 1080);
         canvasObj.AddComponent<GraphicRaycaster>();
-        canvasRaiz = canvasObj.transform;
+        Transform raiz = canvasObj.transform;
 
-        // Panel Izquierdo: Selección Base Aliada (Jugador 1)
-        contenedorListaJ1 = CrearPanelLateral(canvasObj.transform, "Panel_Aliado_J1",
+        // Paneles laterales con las unidades del Excel
+        contenedorListaJ1 = CrearPanelLateral(raiz, "Panel_Aliado_J1",
             new Vector2(0, 0), new Vector2(0, 1), new Vector2(0, 0.5f), new Vector2(10, 0),
-            "UNIDADES BASE ALIADA\n(Arrastra a tu Grid)", new Color(0.1f, 0.25f, 0.15f, 0.9f));
+            "UNIDADES BASE ALIADA (J1)\n(Arrastra a tu Grid)", new Color(0.1f, 0.2f, 0.3f, 0.9f));
 
-        // Panel Derecho: Selección Base Enemiga (Jugador 2)
-        contenedorListaJ2 = CrearPanelLateral(canvasObj.transform, "Panel_Enemigo_J2",
+        contenedorListaJ2 = CrearPanelLateral(raiz, "Panel_Enemigo_J2",
             new Vector2(1, 0), new Vector2(1, 1), new Vector2(1, 0.5f), new Vector2(-10, 0),
-            "UNIDADES BASE ENEMIGA\n(Arrastra a su Grid)", new Color(0.3f, 0.12f, 0.12f, 0.9f));
+            "UNIDADES BASE ENEMIGA (J2)\n(Arrastra a su Grid)", new Color(0.3f, 0.12f, 0.12f, 0.9f));
 
-        // Barra Superior: Estado y Botón de Iniciar Combate
-        GameObject panelTop = new GameObject("Panel_Superior");
-        panelTop.transform.SetParent(canvasObj.transform, false);
-        Image imgTop = panelTop.AddComponent<Image>();
-        imgTop.color = new Color(0.12f, 0.12f, 0.12f, 0.9f);
-        RectTransform rtTop = panelTop.GetComponent<RectTransform>();
-        rtTop.anchorMin = new Vector2(0.5f, 1f);
-        rtTop.anchorMax = new Vector2(0.5f, 1f);
-        rtTop.pivot = new Vector2(0.5f, 1f);
-        rtTop.sizeDelta = new Vector2(900, 110);
-        rtTop.anchoredPosition = new Vector2(0, -10);
+        // Barra superior: estado y botón de pelear
+        RectTransform rtTop = CrearPanel(raiz, "Panel_Superior", new Color(0.12f, 0.12f, 0.12f, 0.9f),
+            new Vector2(0.5f, 1f), new Vector2(900, 110), new Vector2(0, -10));
 
-        textoEstadoSuperior = CrearTextoUI(panelTop.transform, "Cargando estadísticas desde Google Sheets...", 20, TextAnchor.UpperCenter);
+        textoEstadoSuperior = CrearTextoUI(rtTop, "Cargando estadísticas desde Google Sheets...", 20, TextAnchor.UpperCenter);
         RectTransform rtTxt = textoEstadoSuperior.GetComponent<RectTransform>();
         rtTxt.anchorMin = new Vector2(0, 0.45f);
         rtTxt.anchorMax = new Vector2(1, 1f);
         rtTxt.offsetMin = new Vector2(10, 0);
         rtTxt.offsetMax = new Vector2(-10, -5);
 
-        // Botón Iniciar Combate
-        GameObject btnObj = new GameObject("Boton_IniciarCombate");
-        btnObj.transform.SetParent(panelTop.transform, false);
-        Image imgBtn = btnObj.AddComponent<Image>();
-        imgBtn.color = new Color(0.2f, 0.7f, 0.3f);
-        botonIniciarCombate = btnObj.AddComponent<Button>();
-        botonIniciarCombate.onClick.AddListener(IniciarCombate);
+        botonIniciarCombate = CrearBoton(rtTop, "⚔️ PELEAR", new Color(0.2f, 0.7f, 0.3f), new Vector2(0, 8), IniciarCombate);
 
-        RectTransform rtBtn = btnObj.GetComponent<RectTransform>();
-        rtBtn.anchorMin = new Vector2(0.5f, 0f);
-        rtBtn.anchorMax = new Vector2(0.5f, 0f);
-        rtBtn.pivot = new Vector2(0.5f, 0f);
-        rtBtn.sizeDelta = new Vector2(280, 42);
-        rtBtn.anchoredPosition = new Vector2(0, 8);
+        // Predicción del Excel (debajo de la barra superior)
+        RectTransform rtPred = CrearPanel(raiz, "Panel_Prediccion", new Color(0.1f, 0.1f, 0.18f, 0.92f),
+            new Vector2(0.5f, 1f), new Vector2(900, 60), new Vector2(0, -125));
+        textoPrediccion = CrearTextoUI(rtPred, "", 16, TextAnchor.MiddleCenter);
+        SetFullStretch(textoPrediccion.rectTransform);
 
-        Text txtBtn = CrearTextoUI(btnObj.transform, "⚔️ PELEAR", 20, TextAnchor.MiddleCenter);
-        SetFullStretch(txtBtn.GetComponent<RectTransform>());
+        // Resultado real (oculto hasta que acaba el combate) con botones para repetir o empezar otra prueba
+        RectTransform rtRes = CrearPanel(raiz, "Panel_Resultado", new Color(0.08f, 0.08f, 0.08f, 0.95f),
+            new Vector2(0.5f, 1f), new Vector2(900, 110), new Vector2(0, -190));
+        textoResultado = CrearTextoUI(rtRes, "", 17, TextAnchor.UpperCenter);
+        RectTransform rtTxtRes = textoResultado.rectTransform;
+        rtTxtRes.anchorMin = new Vector2(0, 0.42f);
+        rtTxtRes.anchorMax = Vector2.one;
+        rtTxtRes.offsetMin = new Vector2(10, 0);
+        rtTxtRes.offsetMax = new Vector2(-10, -6);
+
+        botonesFinales = new GameObject("Botones_Finales", typeof(RectTransform));
+        botonesFinales.transform.SetParent(rtRes, false);
+        SetFullStretch((RectTransform)botonesFinales.transform);
+        CrearBoton(botonesFinales.transform, "REPETIR COMBATE", new Color(0.25f, 0.45f, 0.8f), new Vector2(-150, 8), RepetirCombate);
+        CrearBoton(botonesFinales.transform, "NUEVA PRUEBA", new Color(0.5f, 0.5f, 0.5f), new Vector2(150, 8), NuevaPrueba);
+        rtRes.gameObject.SetActive(false);
+
+        // Información en vivo de cada unidad (parte inferior)
+        RectTransform rtVivo = CrearPanel(raiz, "Panel_Combate_EnVivo", new Color(0.05f, 0.05f, 0.05f, 0.85f),
+            new Vector2(0.5f, 0f), new Vector2(1260, 250), new Vector2(0, 10));
+        textoEquipoJ1 = CrearTextoUI(rtVivo, "", 14, TextAnchor.UpperLeft);
+        textoEquipoJ2 = CrearTextoUI(rtVivo, "", 14, TextAnchor.UpperLeft);
+        RectTransform r1 = textoEquipoJ1.rectTransform, r2 = textoEquipoJ2.rectTransform;
+        r1.anchorMin = new Vector2(0f, 0f); r1.anchorMax = new Vector2(0.5f, 1f);
+        r2.anchorMin = new Vector2(0.5f, 0f); r2.anchorMax = new Vector2(1f, 1f);
+        r1.offsetMin = r2.offsetMin = new Vector2(10, 6);
+        r1.offsetMax = r2.offsetMax = new Vector2(-10, -6);
+    }
+
+    RectTransform CrearPanel(Transform padre, string nombre, Color color, Vector2 ancla, Vector2 tamano, Vector2 pos)
+    {
+        GameObject panel = new GameObject(nombre);
+        panel.transform.SetParent(padre, false);
+        Image img = panel.AddComponent<Image>();
+        img.color = color;
+
+        RectTransform rt = panel.GetComponent<RectTransform>();
+        rt.anchorMin = ancla;
+        rt.anchorMax = ancla;
+        rt.pivot = ancla;
+        rt.sizeDelta = tamano;
+        rt.anchoredPosition = pos;
+        return rt;
+    }
+
+    Button CrearBoton(Transform padre, string texto, Color color, Vector2 pos, UnityEngine.Events.UnityAction accion)
+    {
+        GameObject btnObj = new GameObject("Boton_" + texto);
+        btnObj.transform.SetParent(padre, false);
+        Image img = btnObj.AddComponent<Image>();
+        img.color = color;
+        Button btn = btnObj.AddComponent<Button>();
+        btn.onClick.AddListener(accion);
+
+        RectTransform rt = btnObj.GetComponent<RectTransform>();
+        rt.anchorMin = new Vector2(0.5f, 0f);
+        rt.anchorMax = new Vector2(0.5f, 0f);
+        rt.pivot = new Vector2(0.5f, 0f);
+        rt.sizeDelta = new Vector2(280, 42);
+        rt.anchoredPosition = pos;
+
+        Text txt = CrearTextoUI(btnObj.transform, texto, 20, TextAnchor.MiddleCenter);
+        SetFullStretch(txt.rectTransform);
+        return btn;
     }
 
     Transform CrearPanelLateral(Transform parent, string nombre, Vector2 anchorMin, Vector2 anchorMax, Vector2 pivot, Vector2 pos, string titulo, Color colorFondo)
@@ -597,8 +890,8 @@ public class BattlePrototypeManager : MonoBehaviour
         rtTit.sizeDelta = new Vector2(0, 50);
         rtTit.anchoredPosition = new Vector2(0, -5);
 
-        // Zona con scroll: aquí van los desplegables de cada facción
-        GameObject scrollObj = new GameObject("Scroll_Facciones");
+        // Zona con scroll para la lista de unidades
+        GameObject scrollObj = new GameObject("Scroll_Unidades");
         scrollObj.transform.SetParent(panel.transform, false);
         RectTransform rtScroll = scrollObj.AddComponent<RectTransform>();
         rtScroll.anchorMin = Vector2.zero;
@@ -610,7 +903,7 @@ public class BattlePrototypeManager : MonoBehaviour
         scrollObj.AddComponent<RectMask2D>();
         ScrollRect scroll = scrollObj.AddComponent<ScrollRect>();
 
-        GameObject contenedor = new GameObject("Contenedor_Facciones");
+        GameObject contenedor = new GameObject("Contenedor_Unidades");
         contenedor.transform.SetParent(scrollObj.transform, false);
         RectTransform rtCont = contenedor.AddComponent<RectTransform>();
         rtCont.anchorMin = new Vector2(0, 1);
@@ -619,7 +912,12 @@ public class BattlePrototypeManager : MonoBehaviour
         rtCont.sizeDelta = Vector2.zero;
         rtCont.anchoredPosition = Vector2.zero;
 
-        ConfigurarVLG(contenedor.AddComponent<VerticalLayoutGroup>(), 4f);
+        VerticalLayoutGroup vlg = contenedor.AddComponent<VerticalLayoutGroup>();
+        vlg.spacing = 4f;
+        vlg.childControlHeight = true;
+        vlg.childControlWidth = true;
+        vlg.childForceExpandHeight = false;
+        vlg.childForceExpandWidth = true;
         ContentSizeFitter fitter = contenedor.AddComponent<ContentSizeFitter>();
         fitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
 
@@ -635,55 +933,19 @@ public class BattlePrototypeManager : MonoBehaviour
 
     void PoblarListasUI()
     {
-        ActualizarTextoEstado("Arrastra hasta 12 unidades desde ambos paneles hacia cada cuadrícula y pulsa PELEAR.");
+        ActualizarTextoEstado($"Arrastra hasta {maxUnidadesPorEquipo} unidades desde ambos paneles hacia cada cuadrícula y pulsa PELEAR.");
 
         LimpiarHijos(contenedorListaJ1);
         LimpiarHijos(contenedorListaJ2);
-        if (panelVentajas != null) Destroy(panelVentajas);
-
-        // Agrupar unidades por facción manteniendo el orden del Excel
-        List<string> facciones = new List<string>();
-        Dictionary<string, List<ExcelManager.UnitData>> porFaccion =
-            new Dictionary<string, List<ExcelManager.UnitData>>(System.StringComparer.OrdinalIgnoreCase);
 
         foreach (var u in ExcelManager.Instance.ListaUnidades)
         {
-            string f = string.IsNullOrWhiteSpace(u.faccion) ? "Sin facción" : u.faccion.Trim();
-            if (!porFaccion.TryGetValue(f, out var lista))
-            {
-                lista = new List<ExcelManager.UnitData>();
-                porFaccion[f] = lista;
-                facciones.Add(f);
-            }
-            lista.Add(u);
+            CrearTarjetaArrastrable(contenedorListaJ1, u, 1);
+            CrearTarjetaArrastrable(contenedorListaJ2, u, 2);
         }
 
-        foreach (string f in facciones)
-        {
-            CrearGrupoFaccion(contenedorListaJ1, f, porFaccion[f], 1);
-            CrearGrupoFaccion(contenedorListaJ2, f, porFaccion[f], 2);
-        }
-
-        CrearPanelVentajasFacciones(facciones);
-    }
-
-    // ---------------------------------------------------------
-    // Desplegables por facción, nivel de poder y panel de ventajas
-    // ---------------------------------------------------------
-    private Transform canvasRaiz;
-    private GameObject panelVentajas;
-
-    /// <summary>
-    /// Nivel de poder base de una unidad (solo para orientar al jugador).
-    /// Combina daño por segundo y vida efectiva (la vida ajustada por su defensa media).
-    /// Solo se usa como respaldo cuando una unidad no tiene "Poder de combate" en el Excel.
-    /// </summary>
-    public static float CalcularNivelPoder(ExcelManager.UnitData d)
-    {
-        float dps = d.danoAtaque * d.velocidadAtaque;
-        float defMedia = Mathf.Clamp((d.defensaFisica + d.defensaMagica) * 0.5f, 0f, 0.9f);
-        float vidaEfectiva = d.vida / (1f - defMedia);
-        return Mathf.Round(Mathf.Sqrt(Mathf.Max(0f, dps * vidaEfectiva)));
+        if (repetirAlCargar) RecolocarComposicionGuardada();
+        ActualizarPanelCombate();
     }
 
     void LimpiarHijos(Transform padre)
@@ -692,170 +954,44 @@ public class BattlePrototypeManager : MonoBehaviour
         foreach (Transform hijo in padre) Destroy(hijo.gameObject);
     }
 
-    void ConfigurarVLG(VerticalLayoutGroup v, float spacing)
-    {
-        v.spacing = spacing;
-        v.childControlHeight = true;
-        v.childControlWidth = true;
-        v.childForceExpandHeight = false;
-        v.childForceExpandWidth = true;
-    }
-
-    /// <summary>Crea una cabecera clicable que muestra/oculta un cuerpo. Devuelve el objeto raíz del grupo.</summary>
-    GameObject CrearDesplegable(Transform padre, string nombre, string titulo, Color colorCabecera, bool abierto, out Transform cuerpo)
-    {
-        GameObject grupo = new GameObject(nombre);
-        grupo.transform.SetParent(padre, false);
-        ConfigurarVLG(grupo.AddComponent<VerticalLayoutGroup>(), 2f);
-
-        GameObject cab = new GameObject("Cabecera");
-        cab.transform.SetParent(grupo.transform, false);
-        Image imgCab = cab.AddComponent<Image>();
-        imgCab.color = colorCabecera;
-        Button btn = cab.AddComponent<Button>();
-        LayoutElement leCab = cab.AddComponent<LayoutElement>();
-        leCab.preferredHeight = 34f;
-
-        Text txt = CrearTextoUI(cab.transform, "", 15, TextAnchor.MiddleLeft);
-        RectTransform rtTxt = txt.GetComponent<RectTransform>();
-        SetFullStretch(rtTxt);
-        rtTxt.offsetMin = new Vector2(8, 0);
-        rtTxt.offsetMax = new Vector2(-8, 0);
-
-        GameObject cuerpoObj = new GameObject("Cuerpo");
-        cuerpoObj.transform.SetParent(grupo.transform, false);
-        ConfigurarVLG(cuerpoObj.AddComponent<VerticalLayoutGroup>(), 2f);
-        cuerpoObj.SetActive(abierto);
-
-        RectTransform rtGrupo = grupo.GetComponent<RectTransform>();
-        void RefrescarTitulo() { txt.text = (cuerpoObj.activeSelf ? "-  " : "+  ") + titulo; }
-        RefrescarTitulo();
-
-        btn.onClick.AddListener(() =>
-        {
-            cuerpoObj.SetActive(!cuerpoObj.activeSelf);
-            RefrescarTitulo();
-
-            RectTransform raiz = rtGrupo;
-            if (rtGrupo.parent != null && rtGrupo.parent.GetComponent<ContentSizeFitter>() != null)
-                raiz = (RectTransform)rtGrupo.parent;
-            LayoutRebuilder.ForceRebuildLayoutImmediate(raiz);
-        });
-
-        cuerpo = cuerpoObj.transform;
-        return grupo;
-    }
-
-    void CrearGrupoFaccion(Transform padre, string faccion, List<ExcelManager.UnitData> unidades, int idJugador)
-    {
-        Color colorCab = idJugador == 1 ? new Color(0.12f, 0.32f, 0.22f) : new Color(0.38f, 0.14f, 0.14f);
-
-        CrearDesplegable(padre, $"Grupo_{faccion}_J{idJugador}", $"{faccion.ToUpperInvariant()} ({unidades.Count})",
-            colorCab, false, out Transform cuerpo);
-
-        foreach (var u in unidades)
-            CrearTarjetaArrastrable(cuerpo, u, idJugador);
-    }
-
-    void CrearPanelVentajasFacciones(List<string> facciones)
-    {
-        if (canvasRaiz == null || facciones.Count == 0) return;
-
-        panelVentajas = CrearDesplegable(canvasRaiz, "Panel_Ventajas_Facciones", "VENTAJAS ENTRE FACCIONES",
-            new Color(0.15f, 0.15f, 0.25f, 0.95f), false, out Transform cuerpo);
-
-        RectTransform rt = panelVentajas.GetComponent<RectTransform>();
-        rt.anchorMin = new Vector2(0.5f, 1f);
-        rt.anchorMax = new Vector2(0.5f, 1f);
-        rt.pivot = new Vector2(0.5f, 1f);
-        rt.sizeDelta = new Vector2(760f, 0f);
-        rt.anchoredPosition = new Vector2(0f, -125f); // Justo debajo de la barra superior
-
-        ContentSizeFitter fitter = panelVentajas.AddComponent<ContentSizeFitter>();
-        fitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
-
-        Image fondoCuerpo = cuerpo.gameObject.AddComponent<Image>();
-        fondoCuerpo.color = new Color(0.08f, 0.08f, 0.12f, 0.92f);
-        fondoCuerpo.raycastTarget = false;
-        cuerpo.GetComponent<VerticalLayoutGroup>().padding = new RectOffset(10, 10, 6, 6);
-
-        bool hayRelaciones = false;
-        foreach (string atacante in facciones)
-        {
-            var fuerte = new List<string>();
-            var debil = new List<string>();
-
-            foreach (string defensora in facciones)
-            {
-                if (string.Equals(atacante, defensora, System.StringComparison.OrdinalIgnoreCase)) continue;
-
-                // Lo que mi facción hace a la otra, y lo que la otra me hace a mí
-                float yoAtaco = ExcelManager.Instance.ObtenerMultiplicadorFaccion(atacante, defensora);
-                float meAtacan = ExcelManager.Instance.ObtenerMultiplicadorFaccion(defensora, atacante);
-                var ci = System.Globalization.CultureInfo.InvariantCulture;
-
-                if (yoAtaco > 1.001f)
-                {
-                    fuerte.Add($"{defensora} (x{yoAtaco.ToString("0.##", ci)})");
-                    hayRelaciones = true;
-                }
-
-                if (meAtacan > 1.001f)
-                {
-                    debil.Add($"{defensora} (x{meAtacan.ToString("0.##", ci)})");
-                    hayRelaciones = true;
-                }
-                else if (yoAtaco < 0.999f)
-                {
-                    debil.Add($"{defensora} (x{yoAtaco.ToString("0.##", ci)})");
-                    hayRelaciones = true;
-                }
-            }
-
-            string txtFuerte = fuerte.Count > 0 ? string.Join(", ", fuerte) : "-";
-            string txtDebil = debil.Count > 0 ? string.Join(", ", debil) : "-";
-
-            Text linea = CrearTextoUI(cuerpo, $"<b>{atacante}</b>   <color=#7CFF7C>Fuerte vs:</color> {txtFuerte}   <color=#FF8080>Débil ante:</color> {txtDebil}", 14, TextAnchor.MiddleLeft);
-            LayoutElement le = linea.gameObject.AddComponent<LayoutElement>();
-            le.minHeight = 24f;
-        }
-
-        if (!hayRelaciones)
-        {
-            Text aviso = CrearTextoUI(cuerpo, "No se han cargado relaciones entre facciones. Revisa la tabla FACCIONES del Excel.", 14, TextAnchor.MiddleLeft);
-            aviso.gameObject.AddComponent<LayoutElement>().minHeight = 24f;
-        }
-    }
-
     void CrearTarjetaArrastrable(Transform padre, ExcelManager.UnitData data, int idJugador)
     {
         GameObject card = new GameObject($"Card_{data.nombre}_J{idJugador}");
         card.transform.SetParent(padre, false);
 
         Image bg = card.AddComponent<Image>();
-        bg.color = idJugador == 1 ? new Color(0.2f, 0.4f, 0.3f) : new Color(0.45f, 0.2f, 0.2f);
+        bg.color = idJugador == 1 ? new Color(0.18f, 0.32f, 0.45f) : new Color(0.45f, 0.2f, 0.2f);
 
         UnitDragItem drag = card.AddComponent<UnitDragItem>();
         drag.nombreUnidadKey = data.nombre.ToLowerInvariant();
         drag.idJugadorPropietario = idJugador;
 
         LayoutElement le = card.AddComponent<LayoutElement>();
-        le.preferredHeight = 30f;
+        le.preferredHeight = 50f;
 
-        // Solo nombre (izquierda) y nivel de poder base (derecha)
-        Text txtNombre = CrearTextoUI(card.transform, data.nombre, 15, TextAnchor.MiddleLeft);
-        RectTransform rtNombre = txtNombre.GetComponent<RectTransform>();
+        // Línea 1: nombre y Poder Combate del Excel
+        Text txtNombre = CrearTextoUI(card.transform, $"<b>{data.nombre}</b>", 16, TextAnchor.UpperLeft);
+        RectTransform rtNombre = txtNombre.rectTransform;
         SetFullStretch(rtNombre);
         rtNombre.offsetMin = new Vector2(10, 0);
-        rtNombre.offsetMax = new Vector2(-85, 0);
+        rtNombre.offsetMax = new Vector2(-8, -4);
 
-        float poderMostrado = data.poderCombate > 0f ? data.poderCombate : CalcularNivelPoder(data);
-        Text txtPoder = CrearTextoUI(card.transform, $"Poder {poderMostrado:0.##}", 13, TextAnchor.MiddleRight);
+        Text txtPoder = CrearTextoUI(card.transform, $"Poder {N(data.Poder)}", 14, TextAnchor.UpperRight);
         txtPoder.color = new Color(1f, 0.9f, 0.5f);
-        RectTransform rtPoder = txtPoder.GetComponent<RectTransform>();
+        RectTransform rtPoder = txtPoder.rectTransform;
         SetFullStretch(rtPoder);
         rtPoder.offsetMin = new Vector2(10, 0);
-        rtPoder.offsetMax = new Vector2(-8, 0);
+        rtPoder.offsetMax = new Vector2(-8, -4);
+
+        // Línea 2: parámetros que usa el combate
+        Text txtStats = CrearTextoUI(card.transform,
+            $"Daño {N(data.danoAtaque)} · Vida {N(data.vida)} · Cad {N(data.cadencia)}s · Alc {N(data.alcance)} · DPS {N(data.DanoPorSegundo, "0.#")}",
+            12, TextAnchor.LowerLeft);
+        txtStats.color = new Color(0.85f, 0.85f, 0.85f);
+        RectTransform rtStats = txtStats.rectTransform;
+        SetFullStretch(rtStats);
+        rtStats.offsetMin = new Vector2(10, 4);
+        rtStats.offsetMax = new Vector2(-8, 0);
     }
 
     Text CrearTextoUI(Transform parent, string contenido, int fontSize, TextAnchor align)
@@ -869,6 +1005,7 @@ public class BattlePrototypeManager : MonoBehaviour
         t.fontSize = fontSize;
         t.alignment = align;
         t.color = Color.white;
+        t.supportRichText = true;
         t.raycastTarget = false;
         return t;
     }

@@ -165,7 +165,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: cca89d9a9b349c74a91060dffb09260a, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::ExcelManager
-  csvUrl: https://docs.google.com/spreadsheets/d/1skunAahwbC_x-WSd5KPmifCHFmGFpmf_tz8SIGo7gFI/edit?gid=0#gid=0
+  csvUrl: https://docs.google.com/spreadsheets/d/1skunAahwbC_x-WSd5KPmifCHFmGFpmf_tz8SIGo7gFI/edit?gid=278273004#gid=278273004
   ListaUnidades: []
 --- !u!4 &352013676
 Transform:

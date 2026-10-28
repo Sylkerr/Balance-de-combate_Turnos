@@ -1623,7 +1623,7 @@ MonoBehaviour:
   maxUnidadesPorEquipo: 9
   alturaUnidadSobreCasilla: 0.65
   maxAtacantesPorObjetivo: 3
-  alcanceMaxCuerpoACuerpo: 2
+  alcanceMaxCuerpoACuerpo: 1.5
   limitarCombateAlArea: 1
   margenArea: 1.5
 --- !u!114 &1130105334
@@ -1638,7 +1638,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: cca89d9a9b349c74a91060dffb09260a, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::ExcelManager
-  csvUrl: https://docs.google.com/spreadsheets/d/1skunAahwbC_x-WSd5KPmifCHFmGFpmf_tz8SIGo7gFI/edit?gid=0#gid=0
+  csvUrl: https://docs.google.com/spreadsheets/d/1skunAahwbC_x-WSd5KPmifCHFmGFpmf_tz8SIGo7gFI/edit?gid=278273004#gid=278273004
   ListaUnidades: []
 --- !u!4 &1130105335
 Transform:
@@ -2465,7 +2465,7 @@ MonoBehaviour:
   maxUnidadesPorEquipo: 9
   alturaUnidadSobreCasilla: 0.65
   maxAtacantesPorObjetivo: 3
-  alcanceMaxCuerpoACuerpo: 2
+  alcanceMaxCuerpoACuerpo: 1.5
   limitarCombateAlArea: 1
   margenArea: 1.5
 --- !u!114 &2102910040
@@ -2480,7 +2480,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: cca89d9a9b349c74a91060dffb09260a, type: 3}
   m_Name: 
   m_EditorClassIdentifier: Assembly-CSharp::ExcelManager
-  csvUrl: https://docs.google.com/spreadsheets/d/1skunAahwbC_x-WSd5KPmifCHFmGFpmf_tz8SIGo7gFI/edit?gid=0#gid=0
+  csvUrl: https://docs.google.com/spreadsheets/d/1skunAahwbC_x-WSd5KPmifCHFmGFpmf_tz8SIGo7gFI/edit?gid=278273004#gid=278273004
   ListaUnidades: []
 --- !u!1660057539 &9223372036854775807
 SceneRoots:

@@ -24,6 +24,8 @@ public class UnitHealthBar : MonoBehaviour
     private Transform relleno;
     private Material matRelleno;
     private Material matFondo;
+    private TextMesh etiqueta;
+    private int vidaMostrada = -1;
 
     void Awake()
     {
@@ -46,6 +48,11 @@ public class UnitHealthBar : MonoBehaviour
         relleno = CrearQuad("Relleno", matRelleno);
         relleno.localPosition = new Vector3(0f, 0f, -0.005f);
         relleno.localScale = new Vector3(ancho, alto, 1f);
+
+        // Nombre y vida numérica encima de la barra, en el color del equipo
+        etiqueta = CombatVFX.CrearTexto("", Vector3.zero, CombatVFX.ColorEquipo(stats.idJugador), 0.022f);
+        etiqueta.transform.SetParent(raiz, false);
+        etiqueta.transform.localPosition = new Vector3(0f, alto + 0.12f, 0f);
     }
 
     Transform CrearQuad(string nombre, Material mat)
@@ -96,6 +103,13 @@ public class UnitHealthBar : MonoBehaviour
         relleno.localScale = new Vector3(anchoRelleno, alto, 1f);
         relleno.localPosition = new Vector3(-ancho * 0.5f + anchoRelleno * 0.5f, 0f, -0.005f);
         matRelleno.color = Color.Lerp(colorVidaBaja, colorVidaLlena, ratio);
+
+        int vida = Mathf.CeilToInt(Mathf.Max(0f, stats.vidaActual));
+        if (etiqueta != null && vida != vidaMostrada)
+        {
+            vidaMostrada = vida;
+            etiqueta.text = $"{stats.nombreUnidad}  {vida}/{stats.vidaMaxima:0}";
+        }
     }
 
     // La unidad muerta se desactiva (SetActive(false)): su barra desaparece con ella

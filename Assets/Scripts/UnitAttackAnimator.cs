@@ -1,7 +1,7 @@
 using UnityEngine;
 
 /// <summary>
-/// Anima los accesorios de la unidad (sombrero, espada, manos, rifle) cuando realiza un ataque.
+/// Anima los accesorios de la unidad cuando ataca y le da un ligero balanceo al caminar.
 /// Detecta qué accesorios tiene por el nombre de sus hijos, así que no hace falta configurar nada.
 /// </summary>
 public class UnitAttackAnimator : MonoBehaviour
@@ -29,17 +29,27 @@ public class UnitAttackAnimator : MonoBehaviour
         }
     }
 
-    private Parte sombrero, espada, manoIzq, manoDer, rifle;
+    private Parte sombrero, espada, manoIzq, manoDer, rifle, arco, baston, escudo;
+    private Parte[] todas;
     private float tiempo = -1f;
     private float duracion = 0.3f;
 
+    // Balanceo al caminar (se aplica a los accesorios, no al cuerpo, para no pelearse con el NavMeshAgent)
+    private Vector3 posicionAnterior;
+    private float faseCaminar;
+
     void Awake()
     {
-        sombrero = Buscar("Sombrero");
+        sombrero = Buscar("Sombrero") ?? Buscar("Capucha");
         espada = Buscar("Espada");
         manoIzq = Buscar("Mano_Izq");
         manoDer = Buscar("Mano_Der");
         rifle = Buscar("Rifle");
+        arco = Buscar("Arco");
+        baston = Buscar("Baston");
+        escudo = Buscar("Escudo");
+        todas = new[] { sombrero, espada, manoIzq, manoDer, rifle, arco, baston, escudo };
+        posicionAnterior = transform.position;
     }
 
     Parte Buscar(string nombre)
@@ -58,7 +68,16 @@ public class UnitAttackAnimator : MonoBehaviour
 
     void Update()
     {
-        if (tiempo < 0f) return;
+        Vector3 desplazamiento = transform.position - posicionAnterior;
+        desplazamiento.y = 0f;
+        float velocidad = desplazamiento.magnitude / Mathf.Max(0.0001f, Time.deltaTime);
+        posicionAnterior = transform.position;
+
+        if (tiempo < 0f)
+        {
+            AnimarCaminar(velocidad);
+            return;
+        }
 
         tiempo += Time.deltaTime;
         float t = tiempo / duracion;
@@ -73,7 +92,10 @@ public class UnitAttackAnimator : MonoBehaviour
         AnimarSombrero(t);
         AnimarEspada(t);
         AnimarManos(t);
-        AnimarRifle(t);
+        AnimarRetroceso(rifle, t, 0.3f, -14f);
+        AnimarRetroceso(arco, t, 0.2f, 0f);
+        AnimarBaston(t);
+        AnimarEscudo(t);
     }
 
     // ---------------------------------------------------------
@@ -89,7 +111,30 @@ public class UnitAttackAnimator : MonoBehaviour
     }
 
     // ---------------------------------------------------------
-    // Mago: el sombrero da un respingo hacia arriba y se inclina hacia delante al lanzar el hechizo
+    // Caminar: los accesorios suben y bajan al ritmo de los pasos
+    // ---------------------------------------------------------
+    void AnimarCaminar(float velocidad)
+    {
+        if (velocidad < 0.2f)
+        {
+            if (faseCaminar != 0f) { faseCaminar = 0f; RestaurarTodo(); }
+            return;
+        }
+
+        faseCaminar += Time.deltaTime * velocidad * 4f;
+        float bote = Mathf.Abs(Mathf.Sin(faseCaminar)) * 0.08f;
+        float balanceo = Mathf.Sin(faseCaminar) * 8f;
+
+        foreach (Parte p in todas)
+        {
+            if (p == null) continue;
+            p.t.localPosition = p.pos + Vector3.up * bote;
+            p.t.localRotation = Quaternion.Euler(0f, 0f, balanceo) * p.rot;
+        }
+    }
+
+    // ---------------------------------------------------------
+    // Mago / Cultista: el sombrero da un respingo hacia arriba y se inclina hacia delante al lanzar el hechizo
     // ---------------------------------------------------------
     void AnimarSombrero(float t)
     {
@@ -101,7 +146,7 @@ public class UnitAttackAnimator : MonoBehaviour
     }
 
     // ---------------------------------------------------------
-    // Luchador: tajo de arriba abajo girando la espada alrededor del mango
+    // Caballero / Paladín / Cultista: tajo de arriba abajo girando la espada alrededor del mango
     // ---------------------------------------------------------
     void AnimarEspada(float t)
     {
@@ -117,7 +162,7 @@ public class UnitAttackAnimator : MonoBehaviour
     }
 
     // ---------------------------------------------------------
-    // Tanque: las dos manos embisten hacia delante, la derecha un instante después
+    // Ogro: las dos manos embisten hacia delante, la derecha un instante después
     // ---------------------------------------------------------
     void AnimarManos(float t)
     {
@@ -137,22 +182,39 @@ public class UnitAttackAnimator : MonoBehaviour
     }
 
     // ---------------------------------------------------------
-    // Arquero: retroceso del rifle al disparar (empuja hacia atrás y levanta el cañón)
+    // Mosquetero / Arquero: retroceso del arma al disparar
     // ---------------------------------------------------------
-    void AnimarRifle(float t)
+    void AnimarRetroceso(Parte arma, float t, float distancia, float cabeceo)
     {
-        if (rifle == null) return;
+        if (arma == null) return;
         float g = Golpe(t);
-        rifle.t.localPosition = rifle.pos - Vector3.forward * 0.3f * g;
-        rifle.t.localRotation = Quaternion.Euler(-14f * g, 0f, 0f) * rifle.rot;
+        arma.t.localPosition = arma.pos - Vector3.forward * distancia * g;
+        arma.t.localRotation = Quaternion.Euler(cabeceo * g, 0f, 0f) * arma.rot;
+    }
+
+    // ---------------------------------------------------------
+    // Mago / Sacerdote: el bastón se alza y apunta hacia delante
+    // ---------------------------------------------------------
+    void AnimarBaston(float t)
+    {
+        if (baston == null) return;
+        float s = Suave(t);
+        baston.t.localPosition = baston.pos + new Vector3(0f, 0.25f, 0.3f) * s;
+        baston.t.localRotation = Quaternion.Euler(50f * s, 0f, 0f) * baston.rot;
+    }
+
+    // ---------------------------------------------------------
+    // Caballero / Paladín: empujón con el escudo
+    // ---------------------------------------------------------
+    void AnimarEscudo(float t)
+    {
+        if (escudo == null) return;
+        float g = Golpe((t - 0.1f) / 0.9f);
+        escudo.t.localPosition = escudo.pos + Vector3.forward * 0.2f * g;
     }
 
     void RestaurarTodo()
     {
-        sombrero?.Restaurar();
-        espada?.Restaurar();
-        manoIzq?.Restaurar();
-        manoDer?.Restaurar();
-        rifle?.Restaurar();
+        foreach (Parte p in todas) p?.Restaurar();
     }
 }

@@ -145,9 +145,8 @@ public class UnitCombatAI : MonoBehaviour
             if (temporizadorAtaque <= 0f)
             {
                 RealizarAtaque(objetivoActual);
-                // VelocidadAtaque = Ataques por segundo -> Tiempo entre ataques = 1 / APS
-                float aps = Mathf.Max(0.05f, misStats.velocidadAtaque);
-                temporizadorAtaque = 1f / aps;
+                // Cadencia del Excel = segundos entre un ataque y el siguiente
+                temporizadorAtaque = Mathf.Max(0.05f, misStats.cadencia);
             }
         }
         else
@@ -229,23 +228,27 @@ public class UnitCombatAI : MonoBehaviour
     {
         // La animación dura como mucho lo que tarda el siguiente ataque, así que nunca se solapa en unidades rápidas
         if (animador != null)
-            animador.Reproducir(Mathf.Min(0.4f, 0.75f / Mathf.Max(0.05f, misStats.velocidadAtaque)));
+            animador.Reproducir(Mathf.Min(0.4f, 0.75f * Mathf.Max(0.05f, misStats.cadencia)));
 
-        float multFaccion = ExcelManager.Instance.ObtenerMultiplicadorFaccion(misStats.faccion, enemigo.faccion);
+        // Sin facciones ni defensas: cada golpe hace exactamente el "Daño de ataque" del Excel
+        float dano = misStats.danoAtaque;
+        UnitStats atacante = misStats;
+        Color color = CombatVFX.ColorEquipo(misStats.idJugador);
 
-        string tipo = misStats.tipoAtaque.ToLowerInvariant();
-        bool esMagico = tipo.Contains("mág") || tipo.Contains("mag");
-        float defensaObjetivo = esMagico ? enemigo.defensaMagica : enemigo.defensaFisica;
-        defensaObjetivo = Mathf.Clamp(defensaObjetivo, 0f, 0.95f);
-
-        float danoFinal = misStats.danoAtaque * multFaccion * (1f - defensaObjetivo);
-        enemigo.vidaActual -= danoFinal;
-
-        Debug.Log($"[Combate] {misStats.nombreUnidad} (J{misStats.idJugador}) golpea a {enemigo.nombreUnidad} (J{enemigo.idJugador}) por {danoFinal:F1} de daño. Vida restante: {Mathf.Max(0, enemigo.vidaActual):F1}");
-
-        if (!enemigo.EstaVivo)
+        if (EsCuerpoACuerpo())
         {
-            BattlePrototypeManager.Instance.NotificarMuerteUnidad(enemigo);
+            CombatVFX.Impacto(Vector3.Lerp(transform.position, enemigo.transform.position, 0.7f), color);
+            enemigo.RecibirDano(dano, atacante);
         }
+        else
+        {
+            Vector3 boca = transform.position + transform.forward * 0.4f + Vector3.up * transform.localScale.y * 0.3f;
+            CombatVFX.Disparar(boca, enemigo, color, () =>
+            {
+                if (enemigo != null && enemigo.EstaVivo) enemigo.RecibirDano(dano, atacante);
+            });
+        }
+
+        Debug.Log($"[Combate] {misStats.nombreUnidad} (J{misStats.idJugador}) ataca a {enemigo.nombreUnidad} (J{enemigo.idJugador}) por {dano:0.#} de daño.");
     }
 }
